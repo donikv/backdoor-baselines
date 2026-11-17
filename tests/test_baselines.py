@@ -5,13 +5,15 @@ from torch import nn
 
 from bdzoo import build_model
 from bdbaselines import bn, optimization, probes, rules, weights
+from bdbaselines.score import label_of
+
+SMALL = {'preact_resnet18_mlphead': dict(width=8, head_width=24), 'preact_resnet18': dict(width=8),
+         'preact_resnet18_bb': dict(width=8), 'vgg16_mlphead': dict(head_width=24), 'vgg16_gap': {}}
 
 
-def _model(arch, seed=0):
+def _model(arch, seed=0, **extra):
     torch.manual_seed(seed)
-    kw = {'cnn_mlphead': dict(widths=(8, 16, 16), head_width=24), 'preact_resnet18_mlphead': dict(width=8, head_width=24),
-          'preact_resnet18_bb': dict(width=8), 'cnn_gap': dict(widths=(8, 16, 16))}[arch]
-    m = build_model(arch, num_classes=5, **kw)
+    m = build_model(arch, num_classes=5, **SMALL[arch], **extra)
     g = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for mod in m.modules():
@@ -34,25 +36,44 @@ def test_dfb_indicators_and_rownorm():
     assert weights.rownorm(W)['rownorm_target'] == 3 and weights.fields(W, b)['fields_crit'] > 0
 
 
-@pytest.mark.parametrize('arch', ['cnn_mlphead', 'preact_resnet18_mlphead', 'preact_resnet18_bb'])
+@pytest.mark.parametrize('arch', ['preact_resnet18_mlphead', 'vgg16_mlphead', 'vgg16_gap', 'preact_resnet18_bb'])
 def test_probe_and_bn_detectors_run(arch):
     m = _model(arch)
     if hasattr(m, 'head_fc'):
         assert 0 < probes.htell(m, 'cpu', n_probes=256)['htell_u_mean'] <= 1
+    else:
+        with pytest.raises(AttributeError):  # HTell at the head needs the MLP head
+            probes.htell(m, 'cpu', n_probes=256)
     assert 0 < probes.htell_lc1(m, 'cpu', n_probes=256, batch=128)['htell_lc1_u_mean'] <= 1
-    assert 0 <= probes.prop(m, 'cpu', n=64, batch=32)['prop'] <= 1
-    assert np.isfinite(bn.clp(m)['clp_z'])
-    assert np.isfinite(bn.bnp(m, torch.rand(16, 3, 32, 32), 'cpu')['bnp_z'])
-    assert torch.relu(torch.tensor([-1.0, 2.0])).tolist() == [0.0, 2.0]  # ProP restored torch.relu
+    c = bn.clp(m)
+    assert np.isfinite(c['clp_z']) and c['clp_layers'] == {'vgg16_mlphead': 13, 'vgg16_gap': 13}.get(arch, c['clp_layers'])
+    assert ('clp_head_z' in c) == hasattr(m, 'head_bn')
+    out = bn.bnp(m, torch.rand(16, 3, 32, 32), 'cpu')
+    assert np.isfinite(out['bnp_z']) and out['bnp_layer'] == ('head_bn' if hasattr(m, 'head_bn') else out['bnp_layer'])
 
 
 @torch.no_grad()
-@pytest.mark.parametrize('arch', ['cnn_mlphead', 'cnn_gap', 'preact_resnet18_mlphead', 'preact_resnet18_bb'])
-def test_freeeagle_split_reproduces_the_model(arch):
-    m = _model(arch)
-    front, later, _ = optimization.split_model(m)
-    x = torch.rand(4, 3, 32, 32)
+@pytest.mark.parametrize('arch,kw,size,clamp', [('preact_resnet18_mlphead', {}, 32, False), ('preact_resnet18', {}, 32, False),
+                                                ('preact_resnet18_mlphead', {'stem': 'imagenet'}, 64, False),
+                                                ('vgg16_gap', {}, 32, True), ('vgg16_mlphead', {}, 112, True),
+                                                ('preact_resnet18_bb', {}, 32, False)])
+def test_freeeagle_split_reproduces_the_model(arch, kw, size, clamp):
+    m = _model(arch, **kw)
+    front, later, c = optimization.split_model(m)
+    x = torch.rand(2, 3, size, size)
     torch.testing.assert_close(later(front(x)), m(x))
+    assert c == clamp
+    if arch.startswith('vgg'):  # FreeEagle's VGG-16 default: the input of the fourth stage (256 channels at 1/8 resolution)
+        assert front(x).shape[1:] == (256, size // 8, size // 8) and float(front(x).min()) >= 0
+
+
+def test_labels_follow_the_usable_rule():
+    meta = {'attack': 'tact', 'asr_bar': .5, 'settings': {'min_clean_accuracy': .9},
+            'baseline': {'clean_accuracy': .86, 'asr_non_target': .8}}
+    assert label_of(meta) == 'backdoored'  # 0.04 below the accuracy bar: usable
+    assert label_of({**meta, 'baseline': {'clean_accuracy': .84, 'asr_non_target': .8}}) == 'failed'
+    assert label_of({**meta, 'usable': False}) == 'failed' and label_of({'attack': 'clean'}) == 'clean'
+    assert label_of({'attack': 'badnet', 'label': 'backdoored'}) == 'backdoored'  # BackdoorBench imports carry their label
 
 
 def test_rules_on_synthetic_scores():
@@ -63,6 +84,13 @@ def test_rules_on_synthetic_scores():
              **{f'htell_{v}': 0.9 for v in ('u_mean', 'u_l2', 'g_mean', 'g_l2')}} for _ in range(5)]
     p = rules.fit('htell', cfg)
     assert p['variant'] == 'u_mean' and p['threshold'] == max(r['htell_u_mean'] for r in cfg if r['label'] == 'clean')
+    # the variant with the best configuration AUROC, thresholded at its clean maximum (no FPR quota)
+    many = [{'label': 'clean', 'htell_u_mean': .5, 'htell_u_l2': i / 10, 'htell_g_mean': .5, 'htell_g_l2': .5} for i in range(40)]
+    many += [{'label': 'backdoored', 'htell_u_mean': .5, 'htell_u_l2': 9., 'htell_g_mean': .5, 'htell_g_l2': .5}]
+    p = rules.fit('htell', many)
+    assert p['variant'] == 'u_l2' and p['threshold'] == 3.9
+    assert rules.decide('htell', p, {'htell_u_l2': 3.95}) == (3.95, True)
+    assert rules.decide('htell', p, {'htell_u_l2': 3.9}) == (3.9, False)
     assert rules.decide('rownorm', rules.fit('rownorm', cfg), {'rownorm': 3.0}) == (3.0, True)
     assert rules.decide('clp', {}, {'clp_z': 4.0, 'clp_flag': True}) == (4.0, True)
     assert rules.auroc([2, 3], [1, 2]) == 0.875

@@ -1,10 +1,13 @@
 """Score checkpoints with the baseline detectors.
 
-    python -m bdbaselines.score models/*/seed*/*/ --out scores.json [--methods fields dfb htell clp prop bnp mmbd freeeagle rownorm]
+    python -m bdbaselines.score models/*/seed*/*/ --out scores.json [--methods fields dfb htell htell_lc1 clp bnp mmbd freeeagle rownorm]
 
 A MODEL argument is a run directory (model.pt and meta.json, as written by backdoor-zoo) or a model.pt; meta.json gives the
-dataset (image size, classes, clean images for BNP) and the label used by bdbaselines.decide. A method that does not apply
-to an architecture (e.g. head probes without an MLP head) is recorded under 'errors'. Times exclude model loading.
+dataset (image size: 32 px, 64 px TinyImageNet, 224 px ImageNet-30, 112 px imagenet30_112; classes; clean images for BNP)
+and the label used by bdbaselines.decide: 'clean', 'backdoored' for a usable backdoor (the paper's criterion,
+bdzoo.train.usable: clean accuracy at most 0.05 below the dataset's bar and ASR at the attack's bar) and 'failed'
+otherwise. A method that does not apply to an architecture (e.g. HTell without an MLP head) is recorded under 'errors'.
+Times exclude model loading.
 """
 from __future__ import annotations
 
@@ -25,7 +28,14 @@ def label_of(meta: dict) -> str:
         return meta['label']
     if meta.get('attack') == 'clean':
         return 'clean'
-    return 'backdoored' if meta.get('successful_starting_backdoor') else 'failed'
+    if 'usable' in meta:
+        return 'backdoored' if meta['usable'] else 'failed'
+    if 'baseline' not in meta:
+        return 'failed'
+    from bdzoo.train import usable
+
+    meta = {**meta, 'asr_bar': meta.get('asr_bar', meta.get('settings', {}).get('min_asr', 0.9))}  # older fine-tune runs
+    return 'backdoored' if usable(meta) else 'failed'
 
 
 def score_model(path: Path, methods, device: str, data_dir: str, seed: int = 0, fe_dir: Path = optimization.FE_DIR) -> dict:
@@ -46,7 +56,6 @@ def score_model(path: Path, methods, device: str, data_dir: str, seed: int = 0, 
              'clp': lambda: bn.clp(model),
              'htell': lambda: probes.htell(model, device, image_size=size),
              'htell_lc1': lambda: probes.htell_lc1(model, device, image_size=size),
-             'prop': lambda: probes.prop(model, device, image_size=size),
              'bnp': lambda: bn.bnp(model, bn.clean_images(dataset, data_dir, 500), device),
              'mmbd': lambda: optimization.mmbd(model, K, size, device, seed),
              'freeeagle': lambda: optimization.freeeagle(model, K, size, device, seed, fe_dir)}

@@ -6,14 +6,15 @@
                -f_t + max_{k != t} f_k, stopping when the relative change of the loss is below 1e-5; the class statistic is
                the largest margin f_t - max_{k != t} f_k over the 30 images. A gamma law fitted to the other classes'
                statistics gives p = 1 - F(r_max)^K; native rule p <= 0.05, target argmax. Score -log10 p. The random
-               images are seeded (the official script draws them unseeded).
+               images are seeded (the official script draws them unseeded) and have the model's image size (32, 64, 112 or
+               224 px).
     freeeagle  FreeEagle (Fu et al., USENIX Security 2023): its own functions (backdoor_inspection_new.py of
                github.com/FuChong-cyber/Data-Free-Neural-Backdoor-Detector-FreeEagle, commit d045822, MIT license; fetch
                it with scripts/fetch_third_party.sh) run on the later part of the model with the official defaults (one
                dummy per class; Adam lr 1e-2, weight decay 0.005, 1000 steps; softmax posteriors). The split follows the
-               paper's rule for small models ("around the middle layer") and the code's ResNet-18 default (the input of the
-               second stage): CNN at the input of the second max-pool (a ReLU output: clamped at 0, as the official
-               bound_on); PreAct-ResNets at the input of the second stage (a residual sum: not clamped). Metric
+               code's defaults: PreAct-ResNets at the input of the second stage (its ResNet-18 default; a residual sum: not
+               clamped), VGG-16 after the third max-pool (its VGG-16 default, inspect_layer_position 2: the input of the
+               fourth stage; a pooled ReLU output: clamped at 0, as the official bound_on). Metric
                M = (max v - Q3) / (Q3 - Q1) over the column means v of the posterior matrix; the released score is
                |M - 1| (bdbaselines.rules); target argmax v.
 """
@@ -78,19 +79,18 @@ def split_model(model):
     from torch import nn
 
     name = type(model).__name__
-    if name in ('CNNMLPHead', 'CNNGAP'):
-        pools = [i for i, m in enumerate(model.features) if isinstance(m, nn.MaxPool2d)]
-        cut = pools[1]  # the input of the second max-pool: after the second convolution block (a ReLU output)
-        head = (lambda z: model.fc(model.head_relu(model.head_bn(model.head_fc(z))))) if hasattr(model, 'head_fc') else model.fc
-        front = lambda x: model.features[:cut](model.norm(x))  # noqa: E731
-        later = lambda h: head(model.pool(model.features[cut:](h)).flatten(1))  # noqa: E731
-        return front, later, True
     if name in ('PreActResNet', 'PreActResNetMLPHead'):
         cut = next(i for i, b in enumerate(model.layers) if b.conv1.stride[0] == 2)  # the first block of the second stage
         head = (lambda z: model.fc(model.head_relu(model.head_bn(model.head_fc(z))))) if hasattr(model, 'head_fc') else model.fc
         front = lambda x: model.layers[:cut](model.stem(x))  # noqa: E731
         later = lambda h: head(torch.flatten(model.pool(model.relu(model.bn(model.layers[cut:](h)))), 1))  # noqa: E731
         return front, later, False
+    if name in ('VGGGAP', 'VGGMLPHead'):
+        cut = [i for i, m in enumerate(model.features) if isinstance(m, nn.MaxPool2d)][2] + 1  # after the third max-pool
+        head = (lambda z: model.fc(model.head_relu(model.head_bn(model.head_fc(z))))) if hasattr(model, 'head_fc') else model.fc
+        front = lambda x: model.features[:cut](model.norm(x))  # noqa: E731
+        later = lambda h: head(torch.flatten(model.pool(model.features[cut:](h)), 1))  # noqa: E731
+        return front, later, True
     if name == 'PreActResNetBB':
         front = lambda x: model.layer1(model.conv1(model.norm(x)))  # noqa: E731
         later = lambda h: model.linear(torch.flatten(model.avgpool(model.layer4(model.layer3(model.layer2(h)))), 1))  # noqa: E731

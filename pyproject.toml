@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bdbaselines"
-version = "1.0.0"
-description = "Baseline backdoor detectors (Fields, DFBScanner, HTell, CLP, ProP, BNP, MM-BD, FreeEagle) with their native decision rules"
+version = "2.0.0"
+description = "Baseline backdoor detectors (Fields, DFBScanner, HTell, CLP, BNP, MM-BD, FreeEagle, row-norm ratio) with their native decision rules"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
@@ -14,7 +14,7 @@ dependencies = [
     "torchvision>=0.21",
     "numpy>=2",
     "scipy>=1.11",
-    "bdzoo",  # checkpoint loading and data: https://github.com/<org>/backdoor-zoo
+    "bdzoo",  # checkpoint loading and data: https://github.com/donikv/backdoor-zoo
 ]
 
 [project.optional-dependencies]

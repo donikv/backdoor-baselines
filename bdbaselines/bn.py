@@ -1,13 +1,16 @@
 """Detectors built on BatchNorm layers, adapted from neuron-level repair to model-level decisions (flag a model when any
 evaluated unit would be pruned). Higher scores mean more backdoored.
 
-    clp   CLP (Zheng et al., ECCV 2022; BackdoorBench defense/clp.py): for each Conv2d -> BatchNorm2d pair, the upper bound
-          of the channel Lipschitz constant UCLC_k = spectral norm of channel k's kernel (C_in x kh kw) times
-          |gamma_k / sqrt(v_k)|; also head_fc with head_bn folded in (UCLC_j = |A_j| ||w_j||). Score: the largest z-score
-          (UCLC - layer mean) / layer std over layers; native rule z > 3. Data-free
+    clp   CLP (Zheng et al., ECCV 2022; BackdoorBench defense/clp.py): for each Conv2d -> BatchNorm2d pair (in module
+          order: VGG's conv -> BN, the PreAct-ResNets' preceding conv -> bn1 / bn2), the upper bound of the channel
+          Lipschitz constant UCLC_k = spectral norm of channel k's kernel (C_in x kh kw) times |gamma_k / sqrt(v_k)|; also
+          head_fc with head_bn folded in (UCLC_j = |A_j| ||w_j||). Score: the largest z-score (UCLC - layer mean) / layer
+          std over layers; native rule z > 3. Data-free
     bnp   BNP (Zheng et al., NeurIPS 2022): per unit of a BN layer, KL( N(mu_c, v_c) || N(mu_stored, v_stored) ) with
           (mu_c, v_c) the inference-mode moments of the unit's input over 500 clean test images. Score: the largest z-score
-          of the KL within the layer (head BN, else the last BN2d); native rule z > 3. Needs clean images
+          of the KL within the layer; native rule z > 3. Needs clean images. The layer is the head BN of the MLP-head
+          models (the paper's Table 1, ResNet and VGG), else the last BN2d (the paper's BackdoorBench row; the paper does
+          not report BNP on its fully convolutional models)
 """
 from __future__ import annotations
 
@@ -69,11 +72,12 @@ def input_moments(model: nn.Module, x: torch.Tensor, names: list[str], device: s
 
 
 def clean_images(dataset: str, data_dir: str, n: int = 500) -> torch.Tensor:
-    """The defender's clean images: the first n of a seed-0 permutation of the dataset's test split."""
+    """The defender's clean images: the first n of a seed-0 permutation of the dataset's test split, in [0, 1] (read as
+    uint8 and converted after the draw: the same values as a float load, without holding ImageNet-30's test set as float)."""
     from bdzoo.datasets import load
 
-    x, _, _ = load(dataset, False, data_dir)
-    return x[torch.randperm(len(x), generator=torch.Generator().manual_seed(0))[:500]][:n]
+    x, _, _ = load(dataset, False, data_dir, uint8=True)
+    return x[torch.randperm(len(x), generator=torch.Generator().manual_seed(0))[:500]][:n].float().div(255)
 
 
 def bnp_layer(model: nn.Module) -> str:

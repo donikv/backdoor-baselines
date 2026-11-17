@@ -1,5 +1,7 @@
-"""Each method's own decision rule, as published (marks: * needs no reference models, ** needs labelled clean and poisoned
-configuration models, (clean) needs clean reference models only).
+"""Each method's own decision rule, as published and as used in the paper's comparison (Appendix H.4; marks: * needs no
+reference models, ** needs labelled clean and poisoned configuration models, (clean) needs clean reference models only).
+The configuration set passed to ``fit`` holds the clean reference models (label 'clean') and, for **, the labelled
+poisoned configuration models (label 'backdoored'). No rule uses the tested models.
 
     fields     *   Dixon's Q above its critical value at alpha = 0.05
     mmbd       *   p <= 0.05 under the fitted gamma null
@@ -9,13 +11,13 @@ configuration models, (clean) needs clean reference models only).
                    score_norm(mean of the clean configuration models' score_norm'd indicator sums); the cosine-similarity
                    threshold maximises F1 on the labelled configuration models (gp_minimize, 50 calls, 10 random starts,
                    random_state 42); a model is flagged when its similarity is below the threshold
-    htell      **  the probe variant (u/g law, mean/l2 statistic) with the highest AUROC on the labelled configuration models;
-                   the threshold maximises TPR subject to FPR below 5% on them
+    htell      **  the probe variant (u/g law, mean/l2 statistic) with the highest AUROC on the labelled configuration models
+                   (ties to u_mean), flagged above the clean reference maximum of that variant
     freeeagle  **  score |M - 1|; threshold from the ROC of the labelled configuration models, as in its
                    analyze_result_csv.py: the point whose FPR is closest to 0.05 and the midpoint to its neighbour
-    htell_lc1  (clean) LC-1 uniform probes, mean statistic, above the clean reference maximum
+    htell_lc1  (clean) LC-1 uniform probes, mean statistic, above the clean reference maximum (the paper's HTell on
+                   BackdoorBench, which has no labelled poisoned configuration models and no MLP head)
     rownorm    (clean) above the clean reference maximum
-    prop           no threshold specified (AUROC only)
 
 The dfb and freeeagle rules need scikit-optimize and scikit-learn (pip install 'bdbaselines[rules]').
 """
@@ -26,7 +28,7 @@ import numpy as np
 FIXED = {'fields': ('fields_q', 'fields_flag'), 'mmbd': ('mmbd_score', 'mmbd_flag'), 'clp': ('clp_z', 'clp_flag'),
          'bnp': ('bnp_z', 'bnp_flag')}
 CLEAN_MAX = {'rownorm': 'rownorm', 'htell_lc1': 'htell_lc1_u_mean'}
-METHODS = ('fields', 'dfb', 'htell', 'htell_lc1', 'clp', 'prop', 'bnp', 'mmbd', 'freeeagle', 'rownorm')
+METHODS = ('fields', 'dfb', 'htell', 'htell_lc1', 'clp', 'bnp', 'mmbd', 'freeeagle', 'rownorm')
 
 
 def auroc(p, n) -> float | None:
@@ -58,7 +60,7 @@ def _labelled(rows, key):
 
 def fit(method: str, cfg: list[dict]) -> dict:
     """The parameters of ``method``'s decision rule from configuration score rows (each with 'label')."""
-    if method in FIXED or method == 'prop':
+    if method in FIXED:
         return {}
     if method in CLEAN_MAX:
         _, neg = _labelled(cfg, CLEAN_MAX[method])
@@ -67,9 +69,7 @@ def fit(method: str, cfg: list[dict]) -> dict:
         variants = ('u_mean', 'u_l2', 'g_mean', 'g_l2')
         aucs = {v: auroc(*([r[f'htell_{v}'] for r in s] for s in _labelled(cfg, f'htell_{v}'))) or 0.0 for v in variants}
         v = max(variants, key=lambda v: (aucs[v], v == 'u_mean'))
-        neg = sorted((r[f'htell_{v}'] for r in _labelled(cfg, f'htell_{v}')[1]), reverse=True)
-        allowed = max(k for k in range(len(neg)) if k / len(neg) < 0.05)  # clean flags permitted at FPR < 5%
-        return {'variant': v, 'aucs': aucs, 'threshold': neg[allowed]}
+        return {'variant': v, 'aucs': aucs, 'threshold': max(r[f'htell_{v}'] for r in _labelled(cfg, f'htell_{v}')[1])}
     if method == 'dfb':
         from sklearn.metrics import f1_score
         from skopt import gp_minimize
@@ -123,6 +123,4 @@ def decide(method: str, params: dict, row: dict) -> tuple[float | None, bool | N
     if method == 'freeeagle':
         s = row.get('freeeagle')
         return s, None if s is None else s > params['threshold']
-    if method == 'prop':
-        return row.get('prop'), None
     raise ValueError(f'unknown method {method!r}')
